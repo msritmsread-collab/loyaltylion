@@ -2,10 +2,16 @@
 
 Supports Bearer token auth (ProgramApiKey), cursor-based pagination,
 and rate-limited requests (20 req/s).
+
+Authentication priority:
+  1. GCP Secret Manager (on VM with GOOGLE_CLOUD=true)
+  2. Local JSON file (loyaltylion_credentials.json)
 """
 
 import json
+import os
 import time
+import platform
 import logging
 import requests
 from pathlib import Path
@@ -16,8 +22,76 @@ log = logging.getLogger(__name__)
 
 CREDENTIALS_PATH = Path(__file__).parent / "loyaltylion_credentials.json"
 
+# ── Secret Manager Auth ─────────────────────────────────────────────────────
+
+SECRET_API_KEY = "connector-loyaltylion-api-key"
+SECRET_BQ_SA = "connector-bq-service-account"
+
+
+def _is_cloud():
+    """Detect if running on GCP VM."""
+    if os.environ.get("GOOGLE_CLOUD", "").lower() == "true":
+        return True
+    # Fallback: check metadata server
+    try:
+        import urllib.request
+        req = urllib.request.Request(
+            "http://metadata.google.internal/computeMetadata/v1/instance/id",
+            headers={"Metadata-Flavor": "Google"},
+        )
+        with urllib.request.urlopen(req, timeout=2):
+            return True
+    except Exception:
+        return False
+
+
+def _get_secret(secret_id):
+    """Fetch a secret from GCP Secret Manager."""
+    from google.cloud import secretmanager
+    project = os.environ.get("CONNECTOR_PROJECT", "msr-msia-sales-analysis")
+    client = secretmanager.SecretManagerServiceClient()
+    name = f"projects/{project}/secrets/{secret_id}/versions/latest"
+    response = client.access_secret_version(name=name)
+    return response.payload.data.decode("UTF-8")
+
 
 def load_credentials():
+    """Load credentials with Secret Manager fallback.
+
+    Priority:
+      1. GCP Secret Manager (on VM)
+      2. Local JSON file (loyaltylion_credentials.json)
+    """
+    if _is_cloud():
+        log.info("Cloud environment detected — using Secret Manager for credentials")
+        try:
+            api_key = _get_secret(SECRET_API_KEY)
+            # Try Secret Manager for BQ SA key
+            try:
+                bq_sa_json = _get_secret(SECRET_BQ_SA)
+                bq_info = json.loads(bq_sa_json)
+                # Write to temp file for BigQuery client
+                import tempfile
+                tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
+                tmp.write(bq_sa_json)
+                tmp.close()
+                bq_credentials_path = tmp.name
+            except Exception as e:
+                log.warning(f"Could not load BQ SA from Secret Manager: {e}")
+                bq_credentials_path = str(CREDENTIALS_PATH.parent / "bigquery_credentials.json")
+
+            return {
+                "api_key": api_key,
+                "rate_limit_seconds": 0.5,
+                "bigquery_project": os.environ.get("CONNECTOR_PROJECT", "msr-msia-sales-analysis"),
+                "bigquery_dataset": "loyaltylion",
+                "bigquery_credentials_path": bq_credentials_path,
+            }
+        except Exception as e:
+            log.warning(f"Secret Manager failed, falling back to local file: {e}")
+
+    # Fallback: local JSON file
+    log.info(f"Loading credentials from {CREDENTIALS_PATH}")
     with open(CREDENTIALS_PATH) as f:
         return json.load(f)
 

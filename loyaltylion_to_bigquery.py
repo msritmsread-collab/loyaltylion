@@ -188,10 +188,24 @@ class BigQueryLoader:
         creds = credentials or load_credentials()
         self.project_id = creds["bigquery_project"]
         self.dataset_id = creds["bigquery_dataset"]
-        self.client = bigquery.Client.from_service_account_json(
-            creds["bigquery_credentials_path"]
-        )
         self.dataset_ref = f"{self.project_id}.{self.dataset_id}"
+
+        # Try VM default credentials first (on GCP VM), then fall back to SA key file
+        try:
+            import google.auth
+            credentials_obj, project = google.auth.default(
+                scopes=["https://www.googleapis.com/auth/bigquery"]
+            )
+            self.client = bigquery.Client(
+                project=self.project_id,
+                credentials=credentials_obj,
+            )
+            log.info("Using VM default credentials for BigQuery")
+        except Exception:
+            log.info("VM default creds not available, using service account key file")
+            self.client = bigquery.Client.from_service_account_json(
+                creds["bigquery_credentials_path"]
+            )
 
     def ensure_dataset(self):
         """Create dataset if it doesn't exist."""
