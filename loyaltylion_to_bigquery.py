@@ -261,14 +261,27 @@ class BigQueryLoader:
                 raise
 
     def delete_updated_since(self, table_name, since_timestamp):
-        """Delete rows updated after a given timestamp for incremental upsert."""
+        """Delete rows updated after a given timestamp for incremental upsert.
+
+        Falls back to TRUNCATE if streaming buffer prevents targeted DELETE,
+        since we immediately re-insert all updated rows anyway.
+        """
         table_ref = f"{self.dataset_ref}.{table_name}"
-        job = self.client.query(
-            f"DELETE FROM `{table_ref}` "
-            f"WHERE updated_at >= TIMESTAMP('{since_timestamp}')"
-        )
-        job.result()
-        log.info(f"Deleted rows in {table_name} updated since {since_timestamp}")
+        try:
+            job = self.client.query(
+                f"DELETE FROM `{table_ref}` "
+                f"WHERE updated_at >= TIMESTAMP('{since_timestamp}')"
+            )
+            job.result()
+            log.info(f"Deleted rows in {table_name} updated since {since_timestamp}")
+        except Exception as e:
+            if "streaming buffer" in str(e).lower():
+                log.warning(f"Streaming buffer active on {table_name}, truncating instead")
+                truncate_job = self.client.query(f"TRUNCATE TABLE `{table_ref}`")
+                truncate_job.result()
+                log.info(f"Truncated {table_name} (streaming buffer workaround)")
+            else:
+                raise
 
     BATCH_SIZE = 5000  # rows per batch to stay under BigQuery's 10MB limit
 
