@@ -190,8 +190,14 @@ class BigQueryLoader:
         self.dataset_id = creds["bigquery_dataset"]
         self.dataset_ref = f"{self.project_id}.{self.dataset_id}"
 
-        # Try VM default credentials first (on GCP VM), then fall back to SA key file
-        try:
+        # Use service account key file if available, otherwise fall back to VM default creds
+        bq_key_path = creds.get("bigquery_credentials_path", "")
+        import os
+        if bq_key_path and os.path.isfile(bq_key_path):
+            log.info(f"Using service account key file: {bq_key_path}")
+            self.client = bigquery.Client.from_service_account_json(bq_key_path)
+        else:
+            log.info(f"SA key file not found ({bq_key_path}), falling back to VM default credentials")
             import google.auth
             credentials_obj, project = google.auth.default(
                 scopes=["https://www.googleapis.com/auth/bigquery"]
@@ -199,12 +205,6 @@ class BigQueryLoader:
             self.client = bigquery.Client(
                 project=self.project_id,
                 credentials=credentials_obj,
-            )
-            log.info("Using VM default credentials for BigQuery")
-        except Exception:
-            log.info("VM default creds not available, using service account key file")
-            self.client = bigquery.Client.from_service_account_json(
-                creds["bigquery_credentials_path"]
             )
 
     def ensure_dataset(self):
