@@ -260,6 +260,13 @@ class BigQueryLoader:
             else:
                 raise
 
+    def truncate_table(self, table_name):
+        """Truncate a table completely (used for full sync to avoid duplicates)."""
+        table_ref = f"{self.dataset_ref}.{table_name}"
+        job = self.client.query(f"TRUNCATE TABLE `{table_ref}`")
+        job.result()
+        log.info(f"Truncated table {table_name}")
+
     def delete_updated_since(self, table_name, since_timestamp):
         """Delete rows updated after a given timestamp for incremental upsert.
 
@@ -469,9 +476,25 @@ def run_pipeline(mode="full"):
         log.warning("No previous sync state found. Falling back to full sync.")
         mode = "full"
 
+    # Reset sync state in full mode so incremental watermarks start fresh
+    if mode == "full":
+        state = {}
+
     log.info(f"Running pipeline in {mode} mode")
 
     total_rows = 0
+
+    # In full mode, truncate all tables first to avoid duplicates
+    if mode == "full":
+        for table_name in SCHEMAS:
+            try:
+                bq.truncate_table(table_name)
+            except Exception as e:
+                # Table might not exist yet (first run) — skip
+                if "not found" in str(e).lower():
+                    log.info(f"Table {table_name} not found, skipping truncate")
+                else:
+                    raise
 
     # 1. Customers — use updated_at_min to catch point balance changes
     if mode == "incremental" and state.get("ll_customers_updated_at"):
